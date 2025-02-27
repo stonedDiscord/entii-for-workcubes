@@ -2,6 +2,7 @@
 // Despite USB mass storage being SCSI, we will not be using NT scsi drivers.
 #define DEVL 1
 #include <ntddk.h>
+#include <hal.h>
 #include <ntstatus.h>
 #include <ntddcdrm.h>
 #include <ntdddisk.h>
@@ -326,6 +327,7 @@ NTSTATUS MspRunScsi(
 				BytesTransferred = STATUS_TO_IOP( Status );
 				if (!Write && Buffer != NULL) {
 					RtlCopyMemory( Pointer, Controller->Buffer, BytesTransferred );
+					HalSweepDcacheRange(Pointer, BytesTransferred);
 				}
 				if (BytesTransferred == RoundLength) {
 					CurrLength -= BytesTransferred;
@@ -415,6 +417,7 @@ NTSTATUS MspRunScsiMeta(
 				if (Buffer != NULL) {
 					BytesTransferred = STATUS_TO_IOP( Status );
 					RtlCopyMemory( Buffer, MapBuffer, BytesTransferred );
+					HalSweepDcacheRange(Buffer, BytesTransferred);
 				}
 				if (TransferredLength) *TransferredLength = BytesTransferred;
 			}
@@ -788,10 +791,10 @@ static void MspFinishDpc(
 	
 	// Complete the request.
 	IoCompleteRequest(Irp, IO_DISK_INCREMENT);
-	// Start next packet.
-	IoStartNextPacket(DeviceObject, FALSE);
 	// Release the controller object.
 	IoFreeController(Controller);
+	// Start next packet.
+	IoStartNextPacket(DeviceObject, FALSE);
 }
 
 static NTSTATUS MspDeviceCreateImpl(
@@ -1142,7 +1145,7 @@ void MsIoWorkRoutine(PUSBMS_WORK_ITEM Parameter) {
 	NTSTATUS Status = MspClearErrors(Controller, ExtDisk->Lun, 10);
 	if (!NT_SUCCESS(Status)) {
 		Irp->IoStatus.Status = Status;
-		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+		KeInsertQueueDpc(&ExtDisk->FinishDpc, Irp, CtrlObj);
 		return;
 	}
 	

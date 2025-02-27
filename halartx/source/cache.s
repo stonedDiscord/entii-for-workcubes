@@ -9,9 +9,9 @@
 #undef ENABLE_INTERRUPTS
 
 #define DISABLE_INTERRUPTS(p0, s0) \
-        mfmsr   p0 \
-        rlwinm  s0,p0,0,~MASK_SPR(MSR_EE,1) \
-        mtmsr   s0
+        mfmsr   p0 ; \
+        rlwinm  s0,p0,0,~MASK_SPR(MSR_EE,1) ; \
+        mtmsr   s0 ;
 
 #define ENABLE_INTERRUPTS(p0) \
         mtmsr     p0

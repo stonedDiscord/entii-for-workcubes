@@ -103,7 +103,7 @@ NT 3.51 RTM and higher. NT 3.51 betas (build 944 and below) will need kernel pat
 You need devkitPPC. Additionally, a `libgcc.a` compiled for `powerpcle` must be present in `arcfw/gccle`. If you need to find one, it should be present on any Void Linux mirror, the current filename to search for as of 2024-07-12 is `cross-powerpcle-linux-gnu-0.34_1.x86_64.xbps` - decompress it by `zstdcat cross-powerpcle-linux-gnu-0.34_1.x86_64.xbps -o cross-powerpcle-linux-gnu-0.34_1.x86_64.tar`, then pull the file out of the tarball: `usr/lib/gcc/powerpcle-linux-gnu/10.2/libgcc.a`.
 
 * Ensure `DEVKITPPC` environment variable is set to your devkitPPC directory, usually `/opt/devkitpro/devkitPPC`
-* Build the ARC firmware loader: `cd arcldr ; make -f Makefile.rvl ; make -f Makefile.dol ; cd ..`
+* Build the ARC firmware loader: `cd arcldr ; make -f Makefile.wii ; make -f Makefile.gc ; cd ..`
 * Build the little endian libc: `cd arcfw/baselibc ; make ; cd ../..`
 * Build the ARC firmware itself: `cd arcfw; make ; cd ..`
 

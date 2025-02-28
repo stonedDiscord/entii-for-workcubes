@@ -14,8 +14,8 @@ jobs:
     - name: Build ARC Firmware loader
       run: |
         cd arcldr
-        make -f Makefile.rvl
-        make -f Makefile.dol
+        make -f Makefile.wii
+        make -f Makefile.gc
     - name: Build little endian libc
       run: |
         cd arcfw/baselibc

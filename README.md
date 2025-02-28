@@ -111,6 +111,8 @@ You need devkitPPC. Additionally, a `libgcc.a` compiled for `powerpcle` must be 
 
 You need [peppc](https://github.com/Wack0/peppc). Additionally, the powerpc libs from the [NT4 DDK](https://archive.org/details/94396011997WindowsNTDDKForWinNT4.0WorkstationUS.iso.7z) (`ddk/lib/ppc/free/*.lib`) must be present in `lib`. The rest of the toolchain (VC6 PPC CE cross compiler used for the C preprocessor for asm, as multi-line defines are handled improperly by gcc cpp; assembler PASM.EXE with single branch patched to skip "dump statements"; resource compiler and linker from MSVC 4.2, and its dependencies; `SPLITSYM.EXE` from NT 3.51 DDK to split COFF debug symbols from executables) is present in `msvc-ppc` directory.
 
+To build the NT 3.5x GDI driver `fpgx35dll` you also need the powerpc `winsrv.lib` from NT 3.51 DDK.
+
 The headers are included and come from various places with slight modifications for working with this toolchain, or for backwards compatibility reasons:
 * `nt4/sdk` - NT4 SDK
 * `nt4/ddk` - NT4 DDK (including all the headers from the `src/*/inc` directories)

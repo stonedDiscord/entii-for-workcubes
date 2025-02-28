@@ -40,6 +40,15 @@ static void TexWriteRgb(PUCHAR pTex, ULONG offset, ULONG rgb) {
 	}
 }
 
+static void TexWriteRgb2Aligned(PUCHAR pTex, ULONG offset, ULONG rgb0, ULONG rgb1) {
+	UCHAR r0 = (rgb0 >> 16) & 0xFF;
+	UCHAR r1 = (rgb1 >> 16) & 0xFF;
+	ULONG value = 0xFF00FF00 | ((rgb1 >> 16) & 0xFF) | (((rgb0 >> 16) & 0xFF) << 16);
+	ULONG value2 = ((rgb0 & 0xFFFF) << 16) | (rgb1 & 0xFFFF);
+	NativeWriteBase32(pTex, offset, value);
+	NativeWriteBase32(pTex, offset + 0x20, value2);
+}
+
 BOOL CopyBitsSwap32(
 SURFOBJ  *psoDest,
 SURFOBJ  *psoSrc,
@@ -102,41 +111,56 @@ BOOL copyFromFb)
 		PULONG pulSrcTemp = pulSrc;
 		PULONG pulDstTemp = pulDst;
 		// Bounds check the pointers, we could be in here when drawing off the screen
-		if (pulSrc < pstartSrc) break;
-		if (pulDst < pstartDst) break;
-		
-		ULONG TexOffset = 0;
-		
-		ULONG cxTemp = cx;
-		ULONG cxIdx = 0;
-		if (copyFromFb) {
-			// Read swapped from source, write normally to dest.
-			while (cxTemp--) {
-				if (pulSrcTemp >= pendSrc) break;
-				if (pulDstTemp >= pendDst) break;
-				//ULONG sourceVal = EfbRead32(pulSrcTemp);
-				if ((xSrc + cxIdx) >= srcWidth) break;
-				if ((ySrc + cyIdx) >= srcHeight) break;
-				TexOffset = CalculateTexOffset(xSrc + cxIdx, ySrc + cyIdx, srcWidth);
-				//pulSrcTemp++;
-				*pulDstTemp = TexReadRgb(pSrcFbStart, TexOffset);
-				pulDstTemp++;
-				cxIdx++;
-			}
-		} else {
-			// Read normally from source, write swapped to dest.
-			while (cxTemp--) {
-				if (pulSrcTemp >= pendSrc) break;
-				if (pulDstTemp >= pendDst) break;
-				if ((xDst + cxIdx) >= destWidth) break;
-				if ((yDst + cyIdx) >= destHeight) break;
-				ULONG sourceVal = LoadToRegister32(*pulSrcTemp);
-				pulSrcTemp++;
-				//EfbWrite32(pulDstTemp, sourceVal);
-				//pulDstTemp++;
-				TexOffset = CalculateTexOffset(xDst + cxIdx, yDstStart + cyIdx, destWidth);
-				TexWriteRgb(pDestFbStart, TexOffset, sourceVal);
-				cxIdx++;
+		if (pulSrc >= pstartSrc && pulDst >= pstartDst) {
+			ULONG TexOffset = 0;
+			
+			ULONG cxTemp = cx;
+			ULONG cxIdx = 0;
+			BOOLEAN validAccess;
+			if (copyFromFb) {
+				// Read swapped from source, write normally to dest.
+				while (cxTemp--) {
+					validAccess = pulSrcTemp >= pstartSrc && pulDstTemp >= pstartDst &&
+						pulSrcTemp < pendSrc && pulDstTemp < pendDst &&
+						(xSrc + cxIdx) < srcWidth &&
+						(ySrc + cyIdx) < srcHeight;
+					if (validAccess) {
+						TexOffset = CalculateTexOffset(xSrc + cxIdx, ySrc + cyIdx, srcWidth);
+						//pulSrcTemp++;
+						*pulDstTemp = TexReadRgb(pSrcFbStart, TexOffset);
+					}
+					pulDstTemp++;
+					cxIdx++;
+				}
+			} else {
+				// Read normally from source, write swapped to dest.
+				while (cxTemp--) {
+					validAccess = pulSrcTemp >= pstartSrc && pulDstTemp >= pstartDst &&
+						pulSrcTemp < pendSrc && pulDstTemp < pendDst &&
+						(xDst + cxIdx) < destWidth &&
+						(yDst + cyIdx) < destHeight;
+					if (validAccess) {
+						ULONG sourceVal = LoadToRegister32(*pulSrcTemp);
+						pulSrcTemp++;
+						//EfbWrite32(pulDstTemp, sourceVal);
+						//pulDstTemp++;
+						TexOffset = CalculateTexOffset(xDst + cxIdx, yDstStart + cyIdx, destWidth);
+						ULONG TexOffset2 = CalculateTexOffset(xDst + cxIdx + 1, yDstStart + cyIdx, destWidth);
+						if (((TexOffset & 3) == 0) && (TexOffset2 == (TexOffset + 2)) && (cxTemp > 1)) {
+							// Will be writing the next pixel too, we can optimise this to two writes from four reads and four writes.
+							ULONG sourceVal2 = LoadToRegister32(*pulSrcTemp);
+							pulSrcTemp++;
+							TexWriteRgb2Aligned(pDestFbStart, TexOffset, sourceVal, sourceVal2);
+							cxIdx++;
+							cxTemp--;
+						} else {
+							TexWriteRgb(pDestFbStart, TexOffset, sourceVal);
+						}
+					} else {
+						pulSrcTemp++;
+					}
+					cxIdx++;
+				}
 			}
 		}
 		

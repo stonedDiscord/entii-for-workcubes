@@ -9,7 +9,7 @@
 #include <sdcard/wiisd_io.h>
 #endif
 #include <sdcard/gcsd.h>
-
+#include <sdcard/card_io.h>
 #include <fat.h>
 
 #include <time.h>

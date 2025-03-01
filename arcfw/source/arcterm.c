@@ -13,6 +13,7 @@
 #include "runtime.h"
 
 void TermPowerOffSystem(bool Reset) {
+#if 0 // Does not want to work on real hardware?
 	if (Reset) {
 		// We are still in ARC firmware and can therefore jump to reset stub if it's present
 		if (s_RuntimePointers[RUNTIME_RESET_STUB].v != 0) {
@@ -20,6 +21,7 @@ void TermPowerOffSystem(bool Reset) {
 			ReturnToLoader();
 		}
 	}
+#endif
 
 	if (s_RuntimePointers[RUNTIME_SYSTEM_TYPE].v == ARTX_SYSTEM_FLIPPER) {
 		// Can't shutdown a flipper system from software.

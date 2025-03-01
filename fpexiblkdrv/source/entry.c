@@ -1371,7 +1371,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
 	}
 	
 	if (InitedDevices == 0) {
-		ExiMapFinalise();
+		//ExiMapFinalise();
 		return STATUS_NO_SUCH_DEVICE;
 	}
 	
@@ -1393,7 +1393,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
 	}
 	
 	if (!MountedAtLeastOneDevice) {
-		ExiMapFinalise();
+		//ExiMapFinalise();
 		return STATUS_NO_SUCH_DEVICE;
 	}
 	
@@ -1501,7 +1501,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
 			char path[4] = { '0' + drive, ':', 0, 0 };
 			f_unmount(path);
 		}
-		ExiMapFinalise();
+		//ExiMapFinalise();
 		// Return no such device.
 		return STATUS_NO_SUCH_DEVICE;
 	}

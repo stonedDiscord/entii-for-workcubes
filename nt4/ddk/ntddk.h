@@ -9213,8 +9213,17 @@ KeAcquireSpinLockRaiseToDpc (
     IN PKSPIN_LOCK SpinLock
     );
 
+#if 0 // introduced in NT4
 #define KeAcquireSpinLock(SpinLock, OldIrql) \
     *(OldIrql) = KeAcquireSpinLockRaiseToDpc(SpinLock)
+#endif
+
+__declspec(dllimport)
+VOID
+KeAcquireSpinLock (
+    IN PKSPIN_LOCK SpinLock,
+    OUT PKIRQL OldIrql
+    );
 
 __declspec(dllimport)
 VOID
@@ -9263,8 +9272,17 @@ KeAcquireSpinLockRaiseToSynch (
     IN PKSPIN_LOCK SpinLock
     );
 
+#if 0 // introduced in NT4
 #define KeAcquireSpinLock(SpinLock, OldIrql) \
     *(OldIrql) = KeAcquireSpinLockRaiseToDpc(SpinLock)
+#endif
+
+__declspec(dllimport)
+VOID
+KeAcquireSpinLock (
+    IN PKSPIN_LOCK SpinLock,
+    OUT PKIRQL OldIrql
+    );
 
 VOID
 KeReleaseSpinLock (

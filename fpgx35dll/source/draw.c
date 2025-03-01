@@ -1,5 +1,6 @@
 #include "driver.h"
 #include "runtime.h"
+#include "ppcinst.h"
 
 #define POINTER_SWAP32(ptr) (PULONG)(_Mmio_MungeAddressForBig(ptr, sizeof(ULONG)))
 
@@ -173,6 +174,61 @@ BOOL copyFromFb)
 	return TRUE;
 }
 
+static inline LONG HookSignExtBranch(LONG x) {
+    return x & 0x2000000 ? (LONG)(x | 0xFC000000) : (LONG)(x);
+}
+
+static inline LONG HookSignExt16(SHORT x) {
+    return (LONG)x;
+}
+
+static BOOL IsRetAddrBad(PPPC_INSTRUCTION Addr) {
+	static ULONG s_RetAddrBad = 0;
+	if (s_RetAddrBad != 0) return (ULONG)Addr == s_RetAddrBad;
+	PPPC_INSTRUCTION Insn = Addr;
+	// Two instructions afterwards is beq+ ?
+	Insn += 2;
+	if (Insn->Primary_Op != BC_OP) return FALSE;
+	if (Insn->Bform_BO != 0xD) return FALSE;
+	Insn++;
+	// Next bl (within next 5 instructions) leads to "lwz r3, x(r2)" insn (or a wrapper for that)
+	PPPC_INSTRUCTION Bl = NULL;
+	for (int i = 0; i < 5; i++, Insn++) {
+		if (Insn->Primary_Op != B_OP) continue;
+		if (Insn->Iform_LK == 0) continue;
+		Bl = Insn;
+		break;
+	}
+	
+	if (Bl == NULL) return FALSE;
+	
+	Insn = (PPPC_INSTRUCTION)((ULONG)Bl + HookSignExtBranch(Bl->Iform_LI << 2));
+	if (Insn->Primary_Op == LWZ_OP && Insn->Dform_RA == 2 && Insn->Dform_RT == 3) {
+		// looks good...
+		s_RetAddrBad = (ULONG)Addr;
+		return TRUE;
+	}
+	
+	// might be wrapping it, bl is within 16 instructions
+	Bl = NULL;
+	for (int i = 0; i < 16; i++, Insn++) {
+		if (Insn->Long == 0x4E800020) break; // blr
+		if (Insn->Primary_Op != B_OP) continue;
+		if (Insn->Iform_LK == 0) continue;
+		Bl = Insn;
+		break;
+	}
+	if (Bl == NULL) return FALSE;
+	Insn = (PPPC_INSTRUCTION)((ULONG)Bl + HookSignExtBranch(Bl->Iform_LI << 2));
+	if (Insn->Primary_Op == LWZ_OP && Insn->Dform_RA == 2 && Insn->Dform_RT == 3) {
+		// looks good...
+		s_RetAddrBad = (ULONG)Addr;
+		return TRUE;
+	}
+	
+	return FALSE;
+}
+
 BOOL DrvCopyBits(
 SURFOBJ  *psoDest,
 SURFOBJ  *psoSrc,
@@ -199,7 +255,7 @@ POINTL   *pptlSrc)
 	to this function as a result of the following GDI functions:
 	SetDIBits, SetDIBitsToDevice, GetDIBits, SetBitmapBits, and GetBitmapBits.
 */
-
+	
 	// If both surfaces are not device managed, just call original func:
 	if (psoDest->iType != STYPE_DEVBITMAP && psoSrc->iType != STYPE_DEVBITMAP) {
 		return EngCopyBits(psoDest, psoSrc, pco, pxlo, prclDest, pptlSrc);
@@ -227,6 +283,15 @@ POINTL   *pptlSrc)
 		}
 		psoDest = ppDev->psurfBigFb;
 		return CopyBitsSwap32(psoDest, psoSrc, NULL, NULL, prclDest, &point, FALSE);
+	}
+	
+	// Try to detect CvtDFB2DIB, and fail if so.
+	// On NT 3.5x, success in that scenario causes the caller to delete the source.
+	// If that source is our device-managed surface, this CANNOT happen!
+	if (psoSrc->iType == STYPE_DEVBITMAP && psoDest->iType == STYPE_BITMAP) {
+		// Get the return address of function
+		PPPC_INSTRUCTION Insn = (PPPC_INSTRUCTION)__builtin_return_address(0);
+		if (IsRetAddrBad(Insn)) return FALSE;
 	}
 	
 	// Copying to framebuffer

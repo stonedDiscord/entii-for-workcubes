@@ -125,20 +125,23 @@ endif
 %.asm: %.i
 	$(SILENTCMD)cp $< $@
 
-#---------------------------------------------------------------------------------
-%.asm: %.cpp
-	$(SILENTMSG) $(notdir $<)
-	$(SILENTCMD)$(CXX) -MMD -MP -MF $(DEPSDIR)/$*.d $(CPPFLAGS) $(CXXFLAGS) -S $< -o - $(ERROR_FILTER) | $(GCPP) - -P -w -o $@
+%.asm: %.as
+	@$(GCPP) -P -w -o $@ $< 2>&1
 
 #---------------------------------------------------------------------------------
-%.asm: %.c
+%.as: %.cpp
 	$(SILENTMSG) $(notdir $<)
-	$(SILENTCMD)$(CC) -MMD -MP -MF $(DEPSDIR)/$*.d $(CPPFLAGS) $(CFLAGS) -S $< -o - $(ERROR_FILTER) | $(GCPP) - -P -w -o $@
+	$(SILENTCMD)$(CXX) -MMD -MP -MF $(DEPSDIR)/$*.d $(CPPFLAGS) $(CXXFLAGS) -S $< -o $@ $(ERROR_FILTER)
 
 #---------------------------------------------------------------------------------
-%.asm: %.m
+%.as: %.c
 	$(SILENTMSG) $(notdir $<)
-	$(SILENTCMD)$(CC) -MMD -MP -MF $(DEPSDIR)/$*.d $(CPPFLAGS) $(OBJCFLAGS) -S $< -o - $(ERROR_FILTER) | $(GCPP) - -P -w -o $@
+	$(SILENTCMD)$(CC) -MMD -MP -MF $(DEPSDIR)/$*.d $(CPPFLAGS) $(CFLAGS) -S $< -o $@ $(ERROR_FILTER)
+
+#---------------------------------------------------------------------------------
+%.as: %.m
+	$(SILENTMSG) $(notdir $<)
+	$(SILENTCMD)$(CC) -MMD -MP -MF $(DEPSDIR)/$*.d $(CPPFLAGS) $(OBJCFLAGS) -S $< -o $@ $(ERROR_FILTER)
 
 MACHDEP =  -D_WIN32_WINNT=0x0400 -mcpu=603 -mhard-float -Wno-builtin-declaration-mismatch -D"__int64=long long" -D_M_PPC -D_PPC_ -D_WIN32 -D__unaligned= -D_DLL=1 -D__STDC__=0 -D_MSC_VER=0 -D__cdecl= -D__stdcall= -fno-builtin
 

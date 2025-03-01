@@ -508,6 +508,29 @@ static NTSTATUS SdmcpGetStatus(PULONG Status) {
 	return NtStatus;
 }
 
+static void SdmcpGetStatusLocked(PSDMC_LOCK_CONTEXT Context) {
+	Context->Status = SdmcpGetStatus((PULONG)Context->Buffer);
+	KeSetEvent(&Context->Event, (KPRIORITY)0, FALSE);
+}
+
+static NTSTATUS SdmcpGetStatusExt(PULONG Buffer) {
+	PSDMC_LOCK_CONTEXT Context = SdmcpGetStateContext();
+	if (Context == NULL) return STATUS_INSUFFICIENT_RESOURCES;
+	
+	Context->Buffer = Buffer;
+	
+	NTSTATUS Status = SdmcpLockController(SdmcpGetStatusLocked, Context);
+	if (!NT_SUCCESS(Status)) {
+		SdmcpReleaseStateContext(Context);
+		return Status;
+	}
+	
+	KeWaitForSingleObject( &Context->Event, Executive, KernelMode, FALSE, NULL);
+	Status = Context->Status;
+	SdmcpReleaseStateContext(Context);
+	return Status;
+}
+
 static NTSTATUS SdmcpResetCard(void) {
 	static STACK_ALIGN(ULONG, lStatus, 1, 32);
 	s_SdmcRca = 0;
@@ -1079,7 +1102,7 @@ DSTATUS SdmcFfsStatus(void) {
 	if (s_SdmcIsInitialised == FALSE) return STA_NOINIT;
 	
 	ULONG CardStatus;
-	NTSTATUS Status = SdmcpGetStatus(&CardStatus);
+	NTSTATUS Status = SdmcpGetStatusExt(&CardStatus);
 	if (!NT_SUCCESS(Status)) {
 		return STA_NOINIT;
 	}

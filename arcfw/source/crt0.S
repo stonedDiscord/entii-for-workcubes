@@ -97,6 +97,7 @@ _start:
 #endif
 	b FwMain
 
+#if 0
 	.globl ReturnToLoader
 ReturnToLoader:
 	lis r3, 0x8000
@@ -110,3 +111,4 @@ ReturnToLoader:
 	rlwinm r3,r3,0,0,30
 	mtsrr1 r3
 	rfi
+#endif

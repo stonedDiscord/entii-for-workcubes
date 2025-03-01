@@ -106,7 +106,7 @@ static NTSTATUS ExipLock(ULONG channel, HAL_EXI_LOCK_CALLBACK callback, PVOID co
 		return STATUS_SUCCESS;
 	}
 	
-	DbgPrint("EXILOCK: caller at %08x wanted locked chan%d\n", __builtin_return_address(0), channel);
+	//DbgPrint("EXILOCK: caller at %08x wanted locked chan%d\n", __builtin_return_address(0), channel);
 	return STATUS_PENDING;
 }
 

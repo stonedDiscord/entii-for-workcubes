@@ -33,4 +33,5 @@ jobs:
     - name: Build ARC Firmware
       run: |
         cd arcfw
+        mkdir build
         make

@@ -20,6 +20,13 @@ jobs:
       run: |
         cd arcfw/baselibc
         make
+    - name: Download libc
+      run: |
+        cd ..
+        wget https://repo-de.voidlinux.org/current/cross-powerpcle-linux-gnu-0.34_1.x86_64.xbps
+        zstdcat cross-powerpcle-linux-gnu-0.34_1.x86_64.xbps -o cross-powerpcle-linux-gnu-0.34_1.x86_64.tar
+        tar -xf cross-powerpcle-linux-gnu-0.34_1.x86_64.tar
+        cp usr/lib/gcc/powerpcle-linux-gnu/10.2/libgcc.a entii-for-workcubes/arcfw/gccle/
     - name: Build ARC Firmware
       run: |
         cd arcfw

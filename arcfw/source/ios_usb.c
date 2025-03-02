@@ -610,6 +610,8 @@ static LONG UlpResumeDevice(IOS_USB_HANDLE DeviceHandle) {
 	return UlpSuspendResume(DeviceHandle, true);
 }
 
+void UlPoll(void);
+
 LONG UlInit(void) {
 	LONG Status = 0;
 	if (s_AttachedDevicesVen == NULL) {
@@ -731,6 +733,17 @@ LONG UlInit(void) {
 			// poll for the async ops to finish
 			UlPoll();
 		}
+
+		// It may take some seconds for devices to appear. Keep polling for a few seconds until they do.
+		if (NativeReadBase32(MMIO_OFFSET(s_AttachedDevicesVen, Entries[0].DeviceHandle)) == 0) s_KnownDevicesVen = false;
+		if (NativeReadBase32(MMIO_OFFSET(s_AttachedDevicesHid, Entries[0].DeviceHandle)) == 0) s_KnownDevicesHid = false;
+		ULONG EndTime = currmsecs() + 5001;
+		while (!s_KnownDevicesVen || !s_KnownDevicesHid) {
+			UlPoll();
+			if (currmsecs() >= EndTime) {
+				break;
+			}
+		}
 	}
 
 	return Status;
@@ -834,6 +847,18 @@ static void UlpDeviceChangeCallback(LONG Status, ULONG Result, USB_INTERNAL_ASYN
 	for (ULONG i = 0; i < Length; i++) {
 		NativeWriteBase32(Devices, __builtin_offsetof(IOS_USB_DEVICE_CHANGE, Entries[Result]) + (i * sizeof(ULONG)), 0);
 	}
+
+#if 0
+	for (ULONG i = 0; i < Result; i++) {
+		IOS_USB_DEVICE_ENTRY LocalEntry;
+		LocalEntry.DeviceHandle = NativeReadBase32(MMIO_OFFSET(Devices, Entries[i].DeviceHandle));
+		LocalEntry.VendorId = NativeReadBase16(MMIO_OFFSET(Devices, Entries[i].VendorId));
+		LocalEntry.ProductId = NativeReadBase16(MMIO_OFFSET(Devices, Entries[i].ProductId));
+		LocalEntry.Token = NativeReadBase32(MMIO_OFFSET(Devices, Entries[i].Token));
+
+		printf("%d: %x:%x (%08x)\r\n", i, LocalEntry.VendorId, LocalEntry.ProductId, LocalEntry.DeviceHandle);
+	}
+#endif
 
 	// Call AttachFinish.
 	Status = PxiIopIoctlAsync(

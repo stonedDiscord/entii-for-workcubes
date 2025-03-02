@@ -749,8 +749,59 @@ LONG UlInit(void) {
 	return Status;
 }
 
+static void UlpDeviceChangeCallback(LONG Status, ULONG Result, USB_INTERNAL_ASYNC_VARIANT Variant);
+
 void UlShutdown(void) {
 	if (s_hUsbVen != IOS_HANDLE_INVALID) {
+		// Ensure async operations are done with.
+		// Might be stuck inside devicechange for both, this is allowed;
+		// allow one second for an async operation to complete, reset it if something completed.
+		UCHAR done = 0;
+		ULONG EndTime = currmsecs() + 1001;
+		while (done != (ARC_BIT(0) | ARC_BIT(1))) {
+			LONG Result;
+			PVOID Context;
+			USB_INTERNAL_ASYNC_STATE State;
+			bool doneOne = false;
+			if ((done & ARC_BIT(0)) == 0 && PxiIopIoctlAsyncPoll(s_AsyncIndexVen, &Result, &Context)) {
+				State = (USB_INTERNAL_ASYNC_STATE)Context;
+
+				if (State == STATE_DEVICE_CHANGE) UlpDeviceChangeCallback(Result, Result, VARIANT_VEN);
+				else if (State == STATE_ATTACH_FINISH) {
+					if (Result < 0) {
+						Result = PxiIopIoctlAsync(s_hUsbVen, USB_IOCTL_ATTACH_FINISH, NULL, 0, NULL, 0, IOCTL_SWAP_NONE, IOCTL_SWAP_NONE, (PVOID)STATE_ATTACH_FINISH);
+						if (Result < 0) done |= ARC_BIT(0);
+						else s_AsyncIndexVen = Result;
+					}
+					else done |= ARC_BIT(0);
+				}
+				doneOne = true;
+			}
+
+			if ((done & ARC_BIT(1)) == 0 && PxiIopIoctlAsyncPoll(s_AsyncIndexHid, &Result, &Context)) {
+				State = (USB_INTERNAL_ASYNC_STATE)Context;
+
+				if (State == STATE_DEVICE_CHANGE) UlpDeviceChangeCallback(Result, Result, VARIANT_HID);
+				else if (State == STATE_ATTACH_FINISH) {
+					if (Result < 0) {
+						Result = PxiIopIoctlAsync(s_hUsbHid, USB_IOCTL_ATTACH_FINISH, NULL, 0, NULL, 0, IOCTL_SWAP_NONE, IOCTL_SWAP_NONE, (PVOID)STATE_ATTACH_FINISH);
+						if (Result < 0) done |= ARC_BIT(1);
+						else s_AsyncIndexHid = Result;
+					}
+					else done |= ARC_BIT(1);
+				}
+				doneOne = true;
+			}
+
+			if (!doneOne) {
+				if (currmsecs() >= EndTime) {
+					break;
+				}
+			}
+			else EndTime = currmsecs() + 1001;
+
+			udelay(100);
+		}
 		PxiIopIoctl(s_hUsbHid, USB_IOCTL_SHUTDOWN, NULL, 0, NULL, 0, IOCTL_SWAP_NONE, IOCTL_SWAP_NONE);
 		PxiIopClose(s_hUsbHid);
 		PxiIopIoctl(s_hUsbVen, USB_IOCTL_SHUTDOWN, NULL, 0, NULL, 0, IOCTL_SWAP_NONE, IOCTL_SWAP_NONE);

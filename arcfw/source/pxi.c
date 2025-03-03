@@ -940,7 +940,7 @@ bool PxiIopIoctlvAsyncPoll(ULONG index, LONG* Result, PVOID* Context) {
 	for (ULONG i = 0; i < NumBuffers; i++) {
 		if (Buffers[i].Pointer == NULL) continue;
 		ULONG Length = Buffers[i].Length;
-		ULONG phys = Buffers[i].Pointer;
+		ULONG phys = (ULONG)Buffers[i].Pointer;
 		Buffers[i].Pointer = MEM_PHYSICAL_TO_K0(phys);
 		if ((BuffersInPhysSpace & BIT(i)) != 0) Buffers[i].Pointer = MEM_PHYSICAL_TO_K1(phys);
 		Buffers[i].Length = Length;

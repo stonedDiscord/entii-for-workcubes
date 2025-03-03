@@ -639,7 +639,7 @@ static void ArcPrintDevice(PDEVICE_ENTRY Device) {
 static void ArcPrintTreeImpl(PDEVICE_ENTRY Device) {
     if (Device == NULL) return;
 
-    for (PDEVICE_ENTRY Child = (PDEVICE_ENTRY)ArcGetChild(Device); Child != NULL; Child = (PDEVICE_ENTRY)ArcGetChild(Child)) {
+    for (PDEVICE_ENTRY Child = (PDEVICE_ENTRY)ArcGetChild((PCONFIGURATION_COMPONENT)Device); Child != NULL; Child = (PDEVICE_ENTRY)ArcGetChild((PCONFIGURATION_COMPONENT)Child)) {
         ArcPrintDevice(Child);
         for (PDEVICE_ENTRY This = (PDEVICE_ENTRY)ArcGetPeer(Child); This != NULL; This = (PDEVICE_ENTRY)ArcGetPeer(This)) {
             ArcPrintDevice(This);

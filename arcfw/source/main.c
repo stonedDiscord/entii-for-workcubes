@@ -31,6 +31,7 @@
 #include "exi_ide.h"
 
 #include "fatfs/ff.h"
+#include "fatfs/diskio.h"
 
 ULONG s_MacIoStart;
 
@@ -1185,7 +1186,7 @@ void ARC_NORETURN FwMain(PHW_DESCRIPTION Desc) {
 		(*(PULONG)0x8000180c == 'STUB' && *(PULONG)0x80001808 == 'HAXX') ||
 		(*(PULONG)0x80001800 == 'STUB' && *(PULONG)0x8000180c == 'HAXX')
 	)) {
-		ReloadStub = ArcMemAllocDirect(0x2000, false);
+		ReloadStub = (ULONG)ArcMemAllocDirect(0x2000, false);
 		for (ULONG i = 0; i < 0x1800; i += 4) {
 			*(PULONG)(ReloadStub + i) = *(PULONG)(0x80001800 + i);
 		}

@@ -9,10 +9,12 @@
 #include <sdcard/wiisd_io.h>
 #endif
 #include <sdcard/gcsd.h>
-
+#include <sdcard/card_cmn.h>
+#include <sdcard/card_io.h>
 #include <fat.h>
 
 #include <time.h>
+#include <unistd.h>
 #include <ogc/lwp_watchdog.h>
 
 #include <ogc/texconv.h>
@@ -641,7 +643,7 @@ int main(int argc, char** argv) {
 		// reload IOS, get rid of our existing environment
 		__IOS_LaunchNewIOS(ios);
 		// wait for IOS to finish loading
-		udelay(1000000);
+		usleep(1000000);
 		// and patch again, we want to reload IOS on the way in to NT
 		if (!IsEmulator) patch_ahbprot_reset();
 	}

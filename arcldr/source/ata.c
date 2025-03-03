@@ -17,6 +17,7 @@
 #include "ata.h"
 #include <malloc.h>
 #include <time.h>
+#include <unistd.h>
 #include <ogc/lwp_watchdog.h>
 
 #define IDE_EXI_V1 0

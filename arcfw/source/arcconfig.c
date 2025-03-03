@@ -639,9 +639,9 @@ static void ArcPrintDevice(PDEVICE_ENTRY Device) {
 static void ArcPrintTreeImpl(PDEVICE_ENTRY Device) {
     if (Device == NULL) return;
 
-    for (PDEVICE_ENTRY Child = (PDEVICE_ENTRY)ArcGetChild((PCONFIGURATION_COMPONENT)Device); Child != NULL; Child = (PDEVICE_ENTRY)ArcGetChild((PCONFIGURATION_COMPONENT)Child)) {
+    for (PDEVICE_ENTRY Child = (PDEVICE_ENTRY)ArcGetChild((&Device->Component); Child != NULL; Child = (PDEVICE_ENTRY)ArcGetChild(&Child->Component)) {
         ArcPrintDevice(Child);
-        for (PDEVICE_ENTRY This = (PDEVICE_ENTRY)ArcGetPeer((PCONFIGURATION_COMPONENT)Child); This != NULL; This = (PDEVICE_ENTRY)ArcGetPeer((PCONFIGURATION_COMPONENT)This)) {
+        for (PDEVICE_ENTRY This = (PDEVICE_ENTRY)ArcGetPeer(&Child->Component); This != NULL; This = (PDEVICE_ENTRY)ArcGetPeer(&This->Component)) {
             ArcPrintDevice(This);
             if (This->Child != NULL) ArcPrintTreeImpl(This);
         }

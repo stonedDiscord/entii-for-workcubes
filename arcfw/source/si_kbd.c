@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <memory.h>
+#include <unistd.h>
 #include "arc.h"
 #include "types.h"
 #include "runtime.h"
@@ -125,14 +126,14 @@ static const UCHAR sc_64kbdToUsbTable5[] = {
 	0x51, // 0305 [down]
 	0x4f, // 0405 [right]
 	0x1f, // 0505 2"
-	0x20, // 0605 3£
+	0x20, // 0605 3Â£
 	0x21, // 0705 4$
 	0x22, // 0805 5%
 	0x23, // 0905 6^
 	0x53, // 0a05 [num lock]
 	0x00, // 0b05 [menu] - (next to next/previous page) - don't map to anything for now
 	0x1e, // 0c05 1!
-	0x35, // 0d05 `¬
+	0x35, // 0d05 `Â¬
 	0x03, // 0e05 none
 	0x39, // 0f05 [caps lock]
 	0x03, // 1005 none
@@ -289,7 +290,7 @@ static const UCHAR sc_GckbdToUsbTable4C[] =
 	0x29, // 4c [ESC]
 	0x49, // 4d [Insert]
 	0x4c, // 4e [Delete]
-	0x35, // 4f `¬
+	0x35, // 4f `Â¬
 	0x2a, // 50 [backspace]
 	0x2b, // 51 [TAB]
 	0x03, // 52 Unused
@@ -360,7 +361,7 @@ static void SikbdpReset(ULONG channel) {
 	JOYBUS_DEVICE_TYPE DeviceType;
 	DeviceType.Value = 0;
 	for (ULONG attempt = 0; attempt < 10; attempt++) {
-		udelay(1);
+		usleep(1);
 		if (!SiTransferByteSync(channel, SI_CMD_RESET, &DeviceType, 3)) {
 			s_ConnectedDevices[channel].Value = 0xFFFFFFFF;
 			continue;
@@ -376,7 +377,7 @@ void SikbdInit(void) {
 		for (ULONG attempt = 0; attempt < 10; attempt++) {
 			s_ConnectedDevices[channel] = SiGetDeviceTypeReset(channel);
 			if (SiDeviceTypeValid(s_ConnectedDevices[channel])) break;
-			udelay(1);
+			usleep(1);
 		}
 	}
 

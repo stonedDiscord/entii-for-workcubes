@@ -423,7 +423,7 @@ static void ArcEnvLoadParse(PBYTE Data) {
 }
 
 void ArcEnvLoad(void) {
-	if (s_EnvironmentLoaded) return false;
+	if (s_EnvironmentLoaded) return;
 	// Scans through all USB disks.
 	// For each disk check if partition 0 is type 0x41 (PReP) and only two sectors long
 	// if so read it.

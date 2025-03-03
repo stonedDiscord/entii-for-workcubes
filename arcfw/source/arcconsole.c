@@ -213,7 +213,7 @@ void ArcConsoleInit(void* framebuffer, int xstart, int ystart, int xres, int yre
 {
 	console_data_s* con = &stdcon;
 
-	g_framebuffer_phys = MEM_K1_TO_PHYSICAL(framebuffer);
+	g_framebuffer_phys = (ULONG)MEM_K1_TO_PHYSICAL(framebuffer);
 	con->destbuffer = framebuffer;
 	con->con_xres = xres;
 	con->con_yres = yres;

@@ -488,7 +488,7 @@ static ARC_STATUS ArcLoadImpl(
         //ULONG ImageBasePage = (ImageBase & 0x1FFFFFFF) >> PAGE_SHIFT;
 
         // If the last section is named ".debug", don't load it
-        if (!strcmp(&Sections[NumberOfSections - 1].Name, ".debug")) {
+        if (!strcmp((const char*)Sections[NumberOfSections - 1].Name, ".debug")) {
             NumberOfSections--;
             SizeOfImage -= Sections[NumberOfSections].SizeOfRawData;
             OptionalHeader->SizeOfImage = SizeOfImage;

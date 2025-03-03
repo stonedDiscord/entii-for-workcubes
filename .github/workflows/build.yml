@@ -38,8 +38,16 @@ jobs:
     - name: Install zstd
       run: |
         apt-get -y install zstd
+
+    - name: Cache libc
+      id: cache-libc
+      uses: actions/cache@v4
+      with:
+        path: arcfw/gccle
+        key: gccle-libc
         
     - name: Download libc
+      if: steps.cache-libc.outputs.cache-hit != 'true'
       run: |
         cd ..
         wget https://repo-de.voidlinux.org/current/cross-powerpcle-linux-gnu-0.34_1.x86_64.xbps

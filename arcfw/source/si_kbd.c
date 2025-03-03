@@ -3,7 +3,7 @@
 
 #include <stdio.h>
 #include <memory.h>
-#include <unistd.h>
+#include "timer.h"
 #include "arc.h"
 #include "types.h"
 #include "runtime.h"
@@ -361,7 +361,7 @@ static void SikbdpReset(ULONG channel) {
 	JOYBUS_DEVICE_TYPE DeviceType;
 	DeviceType.Value = 0;
 	for (ULONG attempt = 0; attempt < 10; attempt++) {
-		usleep(1);
+		udelay(1);
 		if (!SiTransferByteSync(channel, SI_CMD_RESET, &DeviceType, 3)) {
 			s_ConnectedDevices[channel].Value = 0xFFFFFFFF;
 			continue;
@@ -377,7 +377,7 @@ void SikbdInit(void) {
 		for (ULONG attempt = 0; attempt < 10; attempt++) {
 			s_ConnectedDevices[channel] = SiGetDeviceTypeReset(channel);
 			if (SiDeviceTypeValid(s_ConnectedDevices[channel])) break;
-			usleep(1);
+			udelay(1);
 		}
 	}
 

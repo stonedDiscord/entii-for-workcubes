@@ -4,6 +4,7 @@
 #include "kbd_high.h"
 #include "si_kbd.h"
 #include "ios_usb.h"
+#include "ios_usb_kbd.h"
 
 #define KBD_BUFFER_SIZE 32
 
@@ -22,9 +23,9 @@ static bool s_CapsLock = false;
 // Two lookup tables, encompassing key codes between KEY_A(4) and KEY_SLASH(0x38).
 // en_GB keyboard layout, whatever...
 //static const UCHAR s_LookupNormal[] = "abcdefghijklmnopqrstuvwxyz1234567890\n\x1b\b\x09 -=[]\\#;'`,./";
-//static const UCHAR s_LookupShift [] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ!\"£$%^&*()\n\x1b\b\x09 _+{}|~:@~<>?";
+//static const UCHAR s_LookupShift [] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ!\"Â£$%^&*()\n\x1b\b\x09 _+{}|~:@~<>?";
 static const UCHAR s_LookupNormal[] = "abcdefghijklmnopqrstuvwxyz1234567890\n\x1b\b\x09 -=[]\\\\;#',./";
-static const UCHAR s_LookupShift[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ!\"£$%^&*()\n\x1b\b\x09 _+{}||:~@<>?";
+static const UCHAR s_LookupShift[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ!\"Â£$%^&*()\n\x1b\b\x09 _+{}||:~@<>?";
 
 #define INCREMENT_INDEX(var) (((var) + 1) % sizeof(s_Buffer.Buffer))
 #define INCREMENT_INDEX_READ() INCREMENT_INDEX(s_Buffer.ReadIndex)

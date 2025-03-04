@@ -198,6 +198,18 @@ static void MspToggleLed(void) {
 	MmioWriteBase32(MEM_PHYSICAL_TO_K1(0x0d800000), 0xc0, MmioReadBase32(MEM_PHYSICAL_TO_K1(0x0d800000), 0xc0) ^ 0x20);
 }
 
+static LONG MspClearHalt(IOS_USB_HANDLE DeviceHandle, UCHAR Endpoint) {
+	return UlTransferControlMessage(
+		DeviceHandle,
+		(USB_CTRLTYPE_DIR_HOST2DEVICE | USB_CTRLTYPE_TYPE_STANDARD | USB_CTRLTYPE_REC_ENDPOINT),
+		USB_REQ_CLEARFEATURE,
+		USB_FEATURE_ENDPOINT_HALT,
+		Endpoint,
+		0,
+		NULL
+	);
+}
+
 static LONG MspCtrlMsgTimeout(IOS_USB_HANDLE DeviceHandle, UCHAR RequestType, UCHAR Request, USHORT Value, USHORT Index, USHORT Length, PVOID Data, ULONG SecondsTimeout) {
 	LONG Status = UlTransferControlMessageAsync(DeviceHandle, RequestType, Request, Value, Index, Length, Data);
 	if (Status < 0) return Status;
@@ -252,6 +264,10 @@ static LONG MspBulkMsgTimeout(IOS_USB_HANDLE DeviceHandle, UCHAR Endpoint, USHOR
 	// Ensure the usblow context gets freed.
 	UlGetPassedAsyncContext(Context);
 
+	if (Status < 0) {
+		MspClearHalt(DeviceHandle, Endpoint);
+	}
+
 	// And return.
 	return Status;
 }
@@ -267,9 +283,13 @@ static LONG MspReset(IOS_USB_HANDLE DeviceHandle, UCHAR Interface, UCHAR Endpoin
 		NULL,
 		1
 	);
+	udelay(60000);
 	UlCancelEndpoint(DeviceHandle, EndpointIn);
+	udelay(10000);
 	UlCancelEndpoint(DeviceHandle, EndpointOut);
-	UlClearHalt(DeviceHandle);
+	udelay(10000);
+	MspClearHalt(DeviceHandle, EndpointIn);
+	MspClearHalt(DeviceHandle, EndpointOut);
 	return Status;
 }
 
@@ -294,8 +314,12 @@ static LONG MspSendCbw(
 	*pTag = Controller->CbwTag;
 	Cbw.Tag = Controller->CbwTag;
 	Cbw.Length = Length;
+	Cbw.Lun = Lun;
 	Cbw.Flags = Flags;
-	Cbw.CbLength = (CbLength > 6 ? 10 : 6);
+	if (CbLength > 12) Cbw.CbLength = 16;
+	else if (CbLength > 10) Cbw.CbLength = 12;
+	else if (CbLength > 6) Cbw.CbLength = 10;
+	else Cbw.CbLength = 6;
 	memcpy(Cbw.Cb, Cb, CbLength);
 	memcpy32(pCbw, &Cbw, sizeof(Cbw));
 
@@ -306,6 +330,25 @@ static LONG MspSendCbw(
 		pCbw,
 		SecondsTimeout
 	);
+
+	if (Status == -7102 || Status == -7004) {
+		// Endpoint halted, reset and try again
+		Status = MspReset(
+			Controller->DeviceHandle,
+			Controller->Interface,
+			Controller->EndpointIn,
+			Controller->EndpointOut
+		);
+
+		Status = MspBulkMsgTimeout(
+			Controller->DeviceHandle,
+			Controller->EndpointOut,
+			CBW_SIZE,
+			pCbw,
+			SecondsTimeout
+		);
+	}
+
 	PxiIopFree(pCbw);
 
 	if (Status < 0) return Status;
@@ -334,7 +377,19 @@ static LONG MspReadCsw(
 	);
 
 	do {
-		if (Status < 0) break;
+		if (Status < 0) {
+			if (Status == -7102 || Status == -7004) {
+				// Endpoint halted, clear the halt and try again.
+				MspClearHalt(Controller->DeviceHandle, Controller->EndpointIn);
+				Status = MspBulkMsgTimeout(
+					Controller->DeviceHandle,
+					Controller->EndpointIn,
+					CSW_SIZE,
+					Csw,
+					SecondsTimeout
+				);
+			}
+		}
 		if (Status != CSW_SIZE) {
 			Status = -1;
 			break;
@@ -744,9 +799,13 @@ static LONG MspGetDiskType(PUSBMS_CONTROLLER Controller, UCHAR Lun, PUSBMS_DISK_
 	// send SCSI Read Format Capacities to find out
 	// if any entry matches a known floppy size;
 	// then this is a floppy disk
-	UCHAR FormatCapsBuf[
+	UCHAR FormatCapsBuf2[
 		sizeof(SCSI_FORMAT_CAPACITY_LIST) +
 			(31 * sizeof(SCSI_FORMAT_CAPACITY_ENTRY))
+	];
+	UCHAR FormatCapsBuf[
+		sizeof(SCSI_FORMAT_CAPACITY_LIST) +
+			(1 * sizeof(SCSI_FORMAT_CAPACITY_ENTRY))
 	];
 	UCHAR ScsiCdb12[12];
 	ZeroMemory32(FormatCapsBuf, sizeof(FormatCapsBuf));
@@ -762,6 +821,20 @@ static LONG MspGetDiskType(PUSBMS_CONTROLLER Controller, UCHAR Lun, PUSBMS_DISK_
 		FormatCapsBuf;
 	if (List->Length == 0) return 0;
 	if ((List->Length % sizeof(SCSI_FORMAT_CAPACITY_ENTRY)) != 0) return 0;
+
+	if (List->Length > sizeof(SCSI_FORMAT_CAPACITY_ENTRY)) {
+		// Device returned more than one entry. It's now known how many entries there are so ask for as many as possible
+		UCHAR CompleteSize = List->Length + sizeof(SCSI_FORMAT_CAPACITY_LIST);
+		if (CompleteSize > sizeof(FormatCapsBuf2)) CompleteSize = sizeof(FormatCapsBuf2);
+		ScsiCdb12[8] = CompleteSize;
+		TransferredBytes = 0;
+		Status = MspRunScsiMeta(Controller, Lun, FormatCapsBuf2, CompleteSize, ScsiCdb12, sizeof(ScsiCdb12), &TransferredBytes, NULL, NULL, SecondsTimeout);
+		if (Status < 0) return 0;
+		if (TransferredBytes < sizeof(SCSI_FORMAT_CAPACITY_LIST)) return 0;
+		List = (PSCSI_FORMAT_CAPACITY_LIST)FormatCapsBuf2;
+		if (List->Length == 0) return 0;
+		if ((List->Length % sizeof(SCSI_FORMAT_CAPACITY_ENTRY)) != 0) return 0;
+	}
 
 	ULONG Count = TransferredBytes - sizeof(SCSI_FORMAT_CAPACITY_ENTRY);
 	if (Count >= List->Length) Count = List->Length;
@@ -779,8 +852,8 @@ static LONG MspIsWriteProtect(PUSBMS_CONTROLLER Controller, UCHAR Lun, bool* Wri
 	UCHAR ScsiCdb6[6] = { 0 };
 	ScsiCdb6[0] = SCSI_MODE_SENSE;
 	ScsiCdb6[2] = 0x3F;
-	ScsiCdb6[4] = 192;
-	UCHAR ModeSense[192];
+	ScsiCdb6[4] = 4;
+	UCHAR ModeSense[4];
 
 	ULONG Transferred = 0;
 	Status = MspRunScsiMeta(Controller, Lun, ModeSense, sizeof(ModeSense), ScsiCdb6, sizeof(ScsiCdb6), &Transferred, NULL, NULL, SecondsTimeout);
@@ -928,9 +1001,11 @@ static LONG MspInitDevice(
 		// libogc implementation sends a reset here for usb1;
 		// however we're only using usbv5, so is that actually needed?
 		// let's do it anyway
+#if 0 // seems to break things
 		if (!IsUsb2) {
 			MspReset(DeviceHandle, Interface->bInterfaceNumber, EndpointIn, EndpointOut);
 		}
+#endif
 
 		PUCHAR pMaxLun = (PUCHAR)PxiIopAlloc(sizeof(UCHAR));
 		if (pMaxLun == NULL) {

@@ -13,6 +13,7 @@
 #include "usbms.h"
 #include "iosapi.h"
 #include "zwdd.h"
+#include "runtime.h"
 
 #define SIGNATURE_PARTITION 'UPRT'
 #define SIGNATURE_DISK 'UDSK'
@@ -39,6 +40,43 @@ typedef struct _USBMS_PARTITION {
 	UCHAR PartitionType;
 } USBMS_PARTITION, *PUSBMS_PARTITION;
 
+enum {
+	COUNT_EMERGENCY_BLOCKS = 32
+};
+
+struct _USBMS_CONTROLLER;
+
+typedef struct _USBMS_LOCK_CONTEXT {
+	NTSTATUS Status;
+	KEVENT Event;
+#if 0
+	UCHAR Lun;
+	PUCHAR Buffer;
+	ULONG Length;
+	PUCHAR Cb;
+	UCHAR CbLength;
+	union {
+		BOOLEAN Write;
+		PULONG TransferredLength;
+	};
+	PUCHAR CswStatus;
+	PULONG CswDataResidue;
+	ULONG SecondsTimeout;
+#endif
+
+	PDEVICE_OBJECT DeviceObject;
+	PIRP Irp;
+	BOOLEAN InUse;
+} USBMS_LOCK_CONTEXT, *PUSBMS_LOCK_CONTEXT;
+
+typedef void (*USBMS_LOCK_CALLBACK)(struct _USBMS_CONTROLLER* Controller, PUSBMS_LOCK_CONTEXT Context);
+
+typedef struct _USBMS_WAIT_CONTROL_BLOCK {
+	KDEVICE_QUEUE_ENTRY DeviceQueueEntry;
+	USBMS_LOCK_CALLBACK Callback;
+	PUSBMS_LOCK_CONTEXT Context;
+} USBMS_WAIT_CONTROL_BLOCK, *PUSBMS_WAIT_CONTROL_BLOCK;
+
 typedef struct _USBMS_CONTROLLER {
 	IOS_USB_HANDLE DeviceHandle;
 	PVOID Buffer;
@@ -47,6 +85,9 @@ typedef struct _USBMS_CONTROLLER {
 	UCHAR EndpointOut;
 	UCHAR Interface;
 	UCHAR CbwTag;
+	KDEVICE_QUEUE LockQueue;
+	USBMS_WAIT_CONTROL_BLOCK EmergencyBlocks[COUNT_EMERGENCY_BLOCKS];
+	USBMS_LOCK_CONTEXT StateContext[COUNT_EMERGENCY_BLOCKS];
 } USBMS_CONTROLLER, *PUSBMS_CONTROLLER;
 
 struct _USBMS_EXTENSION {
@@ -89,6 +130,99 @@ _Static_assert(sizeof(PARTITION_INFORMATION) == 0x20);
 // Must be synchronised with arcfw\source\arcdisk.c
 static char s_ControllerPath[] = "scsi(0)";
 
+static PUSBMS_LOCK_CONTEXT MspGetStateContext(PUSBMS_CONTROLLER Controller) {
+	for (ULONG i = 0; i < COUNT_EMERGENCY_BLOCKS; i++) {
+		PUSBMS_LOCK_CONTEXT ctx = &Controller->StateContext[i];
+		if (!ctx->InUse) {
+			KeInitializeEvent(&ctx->Event, SynchronizationEvent, FALSE);
+			ctx->Status = STATUS_SUCCESS;
+			ctx->InUse = 1;
+			return ctx;
+		}
+	}
+	return NULL;
+}
+
+static void MspReleaseStateContext(PUSBMS_LOCK_CONTEXT ctx) {
+	ctx->InUse = 0;
+	//ctx->TransferredLength = NULL;
+}
+
+static NTSTATUS MspLockController(USBMS_LOCK_CALLBACK callback, PUSBMS_CONTROLLER controller, PUSBMS_LOCK_CONTEXT context) {
+	// Allocate a control block to store the callback.
+	PUSBMS_WAIT_CONTROL_BLOCK Block = (PUSBMS_WAIT_CONTROL_BLOCK) ExAllocatePool(NonPagedPool, sizeof(USBMS_WAIT_CONTROL_BLOCK));
+	if (Block == NULL) {
+		// Pick out the first emergency block with a null callback.
+		for (ULONG i = 0; i < COUNT_EMERGENCY_BLOCKS; i++) {
+			if (controller->EmergencyBlocks[i].Callback != NULL) continue;
+			Block = &controller->EmergencyBlocks[i];
+			break;
+		}
+		// If none were found, return insufficient resources.
+		if (Block == NULL) return STATUS_INSUFFICIENT_RESOURCES;
+	}
+	
+	RtlZeroMemory(Block, sizeof(*Block));
+	Block->Callback = callback;
+	Block->Context = context;
+	
+	
+	// Go to DISPATCH_LEVEL when calling device queue related functions
+	KIRQL CurrentIrql;
+	KeRaiseIrql(DISPATCH_LEVEL, &CurrentIrql);
+	BOOLEAN Result = KeInsertDeviceQueue(&controller->LockQueue, &Block->DeviceQueueEntry);
+	KeLowerIrql(CurrentIrql);
+	
+	if (!Result) {
+		// The controller is not busy.
+		// While a lock callback is present, call it and free the block.
+		do {
+			Block->Callback(controller, Block->Context);
+			
+			if (Block >= &controller->EmergencyBlocks[0] && Block < &controller->EmergencyBlocks[COUNT_EMERGENCY_BLOCKS]) {
+				Block->Callback = NULL;
+			} else ExFreePool(Block);
+			
+			KeRaiseIrql(DISPATCH_LEVEL, &CurrentIrql);
+			Block = (PUSBMS_WAIT_CONTROL_BLOCK) KeRemoveDeviceQueue(&controller->LockQueue);
+			KeLowerIrql(CurrentIrql);
+		} while (Block != NULL);
+		
+		return STATUS_SUCCESS;
+	}
+	
+	return STATUS_PENDING;
+}
+
+static void MspUnlockController(PUSBMS_CONTROLLER controller) {
+	while (TRUE) {
+		KIRQL CurrentIrql;
+		KeRaiseIrql(DISPATCH_LEVEL, &CurrentIrql);
+		PUSBMS_WAIT_CONTROL_BLOCK Block = (PUSBMS_WAIT_CONTROL_BLOCK) KeRemoveDeviceQueue(&controller->LockQueue);
+		KeLowerIrql(CurrentIrql);
+		
+		if (Block == NULL) break;
+		
+		Block->Callback(controller, Block->Context);
+		
+		if (Block >= &controller->EmergencyBlocks[0] && Block < &controller->EmergencyBlocks[COUNT_EMERGENCY_BLOCKS]) {
+			Block->Callback = NULL;
+		} else ExFreePool(Block);
+	}
+}
+
+NTSTATUS MspClearHalt(IOS_USB_HANDLE DeviceHandle, UCHAR Endpoint) {
+	return UlTransferControlMessage(
+		DeviceHandle, 
+		(USB_CTRLTYPE_DIR_HOST2DEVICE | USB_CTRLTYPE_TYPE_STANDARD | USB_CTRLTYPE_REC_ENDPOINT),
+		USB_REQ_CLEARFEATURE,
+		USB_FEATURE_ENDPOINT_HALT,
+		Endpoint,
+		0,
+		NULL
+	);
+}
+
 NTSTATUS MspCtrlMsgTimeout(IOS_USB_HANDLE DeviceHandle, UCHAR RequestType, UCHAR Request, USHORT Value, USHORT Index, USHORT Length, PVOID Data, ULONG SecondsTimeout) {
 	PIOS_USB_ASYNC_RESULT Async = ExAllocatePool(NonPagedPool, sizeof(IOS_USB_ASYNC_RESULT));
 	if (Async == NULL) return STATUS_NO_MEMORY;
@@ -113,6 +247,7 @@ NTSTATUS MspCtrlMsgTimeout(IOS_USB_HANDLE DeviceHandle, UCHAR RequestType, UCHAR
 		// Turn it into a failing status.
 		Status = STATUS_IO_TIMEOUT;
 	}
+	
 	if (NT_SUCCESS(Status)) {
 		// Got an IPC response in time.
 		Status = Async->Status;
@@ -164,24 +299,37 @@ NTSTATUS MspBulkMsgTimeout(IOS_USB_HANDLE DeviceHandle, UCHAR Endpoint, USHORT L
 	// Free the async context.
 	ExFreePool( Async );
 	
+	if (!NT_SUCCESS(Status)) {
+		MspClearHalt(DeviceHandle, Endpoint);
+	}
+	
 	// And return.
 	return Status;
 }
 
 NTSTATUS MspReset(IOS_USB_HANDLE DeviceHandle, UCHAR Interface, UCHAR EndpointIn, UCHAR EndpointOut) {
-	NTSTATUS Status = MspCtrlMsgTimeout(
+	NTSTATUS Status = UlTransferControlMessage(
 		DeviceHandle,
 		(USB_CTRLTYPE_DIR_HOST2DEVICE | USB_CTRLTYPE_TYPE_CLASS | USB_CTRLTYPE_REC_INTERFACE),
 		USBSTORAGE_RESET,
 		0,
 		Interface,
 		0,
-		NULL,
-		1
+		NULL
 	);
+	LARGE_INTEGER Timeout = {.QuadPart = 0};
+	Timeout.QuadPart = -MS_TO_TIMEOUT(60);
+	KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
+	
 	UlCancelEndpoint(DeviceHandle, EndpointIn);
 	UlCancelEndpoint(DeviceHandle, EndpointOut);
-	UlClearHalt(DeviceHandle);
+	MspClearHalt(DeviceHandle, EndpointIn);
+	Timeout.QuadPart = -MS_TO_TIMEOUT(10);
+	KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
+	MspClearHalt(DeviceHandle, EndpointOut);
+	Timeout.QuadPart = -MS_TO_TIMEOUT(10);
+	KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
+	
 	return Status;
 }
 
@@ -207,6 +355,7 @@ NTSTATUS MspSendCbw(
 	Cbw.Tag = Controller->CbwTag;
 	Cbw.Length = Length;
 	Cbw.Flags = Flags;
+	Cbw.Lun = Lun;
 	Cbw.CbLength = (CbLength > 6 ? 10 : 6);
 	RtlCopyMemory(Cbw.Cb, Cb, CbLength);
 	RtlCopyMemory(pCbw, &Cbw, sizeof(Cbw));
@@ -218,12 +367,31 @@ NTSTATUS MspSendCbw(
 		pCbw,
 		SecondsTimeout
 	);
+	
+	if (Status == 0xC0101BBE || Status == 0xC0101B5C) {
+		Status = MspReset(
+			Controller->DeviceHandle,
+			Controller->Interface,
+			Controller->EndpointIn,
+			Controller->EndpointOut
+		);
+		//DbgPrint("ResetStatus(SendCbw) %08x\n", Status);
+		
+		Status = MspBulkMsgTimeout(
+			Controller->DeviceHandle,
+			Controller->EndpointOut,
+			CBW_SIZE,
+			pCbw,
+			SecondsTimeout
+		);
+	}
+	
 	HalIopFree(pCbw);
 	
 	if (!NT_SUCCESS(Status)) return Status;
 	
 	LONG IopResult = STATUS_TO_IOP(Status);
-	if (IopResult == CBW_SIZE) return STATUS_SUCCESS;
+	if (IopResult == CBW_SIZE) return Status;
 	return STATUS_IO_DEVICE_ERROR;
 }
 
@@ -247,7 +415,19 @@ NTSTATUS MspReadCsw(
 	);
 	
 	do {
-		if (!NT_SUCCESS(Status)) break;
+		if (!NT_SUCCESS(Status)) {
+			if (Status == 0xC0101BBE || Status == 0xC0101B5C) {
+				MspClearHalt(Controller->DeviceHandle, Controller->EndpointIn);
+				Status = MspBulkMsgTimeout(
+					Controller->DeviceHandle,
+					Controller->EndpointIn,
+					CSW_SIZE,
+					Csw,
+					SecondsTimeout
+				);
+			}
+			if (!NT_SUCCESS(Status)) break;
+		}
 		LONG IopResult = STATUS_TO_IOP(Status);
 		if (IopResult != CSW_SIZE) {
 			Status = STATUS_IO_DEVICE_ERROR;
@@ -255,10 +435,11 @@ NTSTATUS MspReadCsw(
 		}
 		
 		if (Csw->Signature != CSW_SIGNATURE) {
+			//DbgPrint("USBMS: Bad csw, signature=%08x expected %08x\n", Csw->Signature, CSW_SIGNATURE);
 			Status = STATUS_DEVICE_PROTOCOL_ERROR;
 			break;
 		}
-		Status = STATUS_SUCCESS;
+		//Status = STATUS_SUCCESS;
 		if (CswStatus != NULL) {
 			*CswStatus = Csw->Status;
 		}
@@ -267,6 +448,7 @@ NTSTATUS MspReadCsw(
 		}
 		
 		if (Csw->Tag != Tag) {
+			//DbgPrint("USBMS: Bad csw, tag=%08x expected %08x\n", Csw->Tag, Tag);
 			Status = STATUS_DEVICE_PROTOCOL_ERROR;
 		}
 	} while (FALSE);
@@ -300,6 +482,8 @@ NTSTATUS MspRunScsi(
 		if (Status == STATUS_IO_TIMEOUT) break;
 		ULONG Tag;
 		
+		//KeStallExecutionProcessor(100);
+		
 		Status = MspSendCbw(
 			Controller, Lun,
 			CurrLength,
@@ -309,12 +493,14 @@ NTSTATUS MspRunScsi(
 			SecondsTimeout,
 			&Tag
 		);
+		//DbgPrint("SendCbw(%s,%08x) %08x\n", Write ? "Write" : "Read", CurrLength, Status);
 		
 		while (CurrLength > 0 && NT_SUCCESS(Status)) {
 			ULONG RoundLength = CurrLength > MaxSize ? MaxSize : CurrLength;
 			
 			// Always go through the map buffer.
 			if (Write && Buffer != NULL) RtlCopyMemory( Controller->Buffer, Pointer, RoundLength );
+			//KeStallExecutionProcessor(100);
 			Status = MspBulkMsgTimeout(
 				Controller->DeviceHandle,
 				Endpoint,
@@ -322,6 +508,7 @@ NTSTATUS MspRunScsi(
 				Controller->Buffer,
 				SecondsTimeout
 			);
+			//DbgPrint("BulkMsgTimeout(%s,%x) %08x\n", Write ? "Write" : "Read", RoundLength, Status);
 			ULONG BytesTransferred = 0;
 			if (NT_SUCCESS(Status)) {
 				BytesTransferred = STATUS_TO_IOP( Status );
@@ -338,7 +525,9 @@ NTSTATUS MspRunScsi(
 		}
 		
 		if (NT_SUCCESS(Status)) {
+			//KeStallExecutionProcessor(100);
 			Status = MspReadCsw(Controller, Tag, &LocalCswStatus, &LocalDataResidue, SecondsTimeout);
+			//DbgPrint("ReadCsw(%s) %08x\n", Write ? "Write" : "Read", Status);
 		}
 		
 		if (!NT_SUCCESS(Status)) {
@@ -348,6 +537,7 @@ NTSTATUS MspRunScsi(
 				Controller->EndpointIn,
 				Controller->EndpointOut
 			);
+			//DbgPrint("ResetStatus(%s) %08x\n", Write ? "Write" : "Read", Status);
 			if (ResetStatus == STATUS_IO_TIMEOUT) Status = ResetStatus;
 		} else {
 			Status = STATUS_SUCCESS;
@@ -390,8 +580,10 @@ NTSTATUS MspRunScsiMeta(
 	UCHAR LocalCswStatus = 0;
 	ULONG LocalDataResidue = 0;
 	for (UCHAR Retry = 0; Retry < USBSTORAGE_CYCLE_RETRIES; Retry++) {
-		if (Status == STATUS_IO_TIMEOUT) break;
+		//if (Status == STATUS_IO_TIMEOUT) break;
 		ULONG Tag;
+		
+		//KeStallExecutionProcessor(100);
 		
 		Status = MspSendCbw(
 			Controller, Lun,
@@ -402,8 +594,10 @@ NTSTATUS MspRunScsiMeta(
 			SecondsTimeout,
 			&Tag
 		);
+		//DbgPrint("SendCbw(Meta,%02x) %08x\n", Cb[0], Status);
 		
 		if (NT_SUCCESS(Status) && Length != 0) {
+			//KeStallExecutionProcessor(100);
 			// Always go through the map buffer.
 			Status = MspBulkMsgTimeout(
 				Controller->DeviceHandle,
@@ -412,6 +606,7 @@ NTSTATUS MspRunScsiMeta(
 				MapBuffer,
 				SecondsTimeout
 			);
+			//DbgPrint("BulkMsgTimeout(Meta,%x) %08x\n", Length, Status);
 			ULONG BytesTransferred = 0;
 			if (NT_SUCCESS(Status)) {
 				if (Buffer != NULL) {
@@ -424,7 +619,9 @@ NTSTATUS MspRunScsiMeta(
 		}
 		
 		if (NT_SUCCESS(Status)) {
+			//KeStallExecutionProcessor(100);
 			Status = MspReadCsw(Controller, Tag, &LocalCswStatus, &LocalDataResidue, SecondsTimeout);
+			//DbgPrint("ReadCsw(Meta) %08x\n", Status);
 		}
 		
 		if (!NT_SUCCESS(Status)) {
@@ -434,6 +631,7 @@ NTSTATUS MspRunScsiMeta(
 				Controller->EndpointIn,
 				Controller->EndpointOut
 			);
+			//DbgPrint("ResetStatus(Meta) %08x\n", Status);
 			if (ResetStatus == STATUS_IO_TIMEOUT) Status = ResetStatus;
 		} else {
 			Status = STATUS_SUCCESS;
@@ -446,6 +644,8 @@ NTSTATUS MspRunScsiMeta(
 	if (MapBuffer != NULL) HalIopFree(MapBuffer);
 	return Status;
 }
+
+NTSTATUS MspLowReinit(PUSBMS_CONTROLLER Controller, UCHAR Lun);
 
 NTSTATUS MspLowRead10(PUSBMS_CONTROLLER Controller, UCHAR Lun, ULONG SectorStart, USHORT SectorCount, ULONG SectorShift, PVOID Buffer) {
 	NTSTATUS Status;
@@ -669,9 +869,13 @@ NTSTATUS MspGetDiskType(PUSBMS_CONTROLLER Controller, UCHAR Lun, PUSBMS_DISK_TYP
 	// send SCSI Read Format Capacities to find out
 	// if any entry matches a known floppy size;
 	// then this is a floppy disk
+	UCHAR FormatCapsBuf2[
+		sizeof(SCSI_FORMAT_CAPACITY_LIST) +
+			(31 * sizeof(SCSI_FORMAT_CAPACITY_ENTRY))
+	];
 	UCHAR FormatCapsBuf[
 		sizeof(SCSI_FORMAT_CAPACITY_LIST) +
-		(31 * sizeof(SCSI_FORMAT_CAPACITY_ENTRY))
+			(1 * sizeof(SCSI_FORMAT_CAPACITY_ENTRY))
 	];
 	UCHAR ScsiCdb12[12];
 	RtlZeroMemory(FormatCapsBuf, sizeof(FormatCapsBuf));
@@ -687,6 +891,20 @@ NTSTATUS MspGetDiskType(PUSBMS_CONTROLLER Controller, UCHAR Lun, PUSBMS_DISK_TYP
 		FormatCapsBuf;
 	if (List->Length == 0) return STATUS_SUCCESS;
 	if ((List->Length % sizeof(SCSI_FORMAT_CAPACITY_ENTRY)) != 0) return STATUS_SUCCESS;
+	
+	if (List->Length > sizeof(SCSI_FORMAT_CAPACITY_ENTRY)) {
+		// Device returned more than one entry. It's now known how many entries there are so ask for as many as possible
+		UCHAR CompleteSize = List->Length + sizeof(SCSI_FORMAT_CAPACITY_LIST);
+		if (CompleteSize > sizeof(FormatCapsBuf2)) CompleteSize = sizeof(FormatCapsBuf2);
+		ScsiCdb12[8] = CompleteSize;
+		TransferredBytes = 0;
+		Status = MspRunScsiMeta(Controller, Lun, FormatCapsBuf2, CompleteSize, ScsiCdb12, sizeof(ScsiCdb12), &TransferredBytes, NULL, NULL, SecondsTimeout);
+		if (!NT_SUCCESS(Status)) return 0;
+		if (TransferredBytes < sizeof(SCSI_FORMAT_CAPACITY_LIST)) return 0;
+		List = (PSCSI_FORMAT_CAPACITY_LIST)FormatCapsBuf2;
+		if (List->Length == 0) return 0;
+		if ((List->Length % sizeof(SCSI_FORMAT_CAPACITY_ENTRY)) != 0) return 0;
+	}
 	
 	ULONG Count = TransferredBytes - sizeof(SCSI_FORMAT_CAPACITY_ENTRY);
 	if (Count >= List->Length) Count = List->Length;
@@ -704,8 +922,8 @@ NTSTATUS MspIsWriteProtect(PUSBMS_CONTROLLER Controller, UCHAR Lun, PBOOLEAN Wri
 	UCHAR ScsiCdb6[6] = {0};
 	ScsiCdb6[0] = SCSI_MODE_SENSE;
 	ScsiCdb6[2] = 0x3F;
-	ScsiCdb6[4] = 192;
-	UCHAR ModeSense[192];
+	ScsiCdb6[4] = 4;
+	UCHAR ModeSense[4];
 	
 	ULONG Transferred = 0;
 	Status = MspRunScsiMeta(Controller, Lun, ModeSense, sizeof(ModeSense), ScsiCdb6, sizeof(ScsiCdb6), &Transferred, NULL, NULL, SecondsTimeout);
@@ -740,7 +958,7 @@ NTSTATUS MspReadCapacity(PUSBMS_CONTROLLER Controller, UCHAR Lun, PULONG SectorS
 	return STATUS_SUCCESS;
 }
 
-NTSTATUS MspCheckVerify(PDEVICE_OBJECT DeviceObject, PUSBMS_CONTROLLER Controller, PUSBMS_EXTENSION Ext) {
+NTSTATUS MspCheckVerifyLockedImpl(PDEVICE_OBJECT DeviceObject, PUSBMS_CONTROLLER Controller, PUSBMS_EXTENSION Ext) {
 	// Do clear errors. Use 20 second timeout just in case.
 	UCHAR Lun = Ext->Lun;
 	NTSTATUS Status = MspClearErrors(Controller, Lun, 20);
@@ -778,6 +996,35 @@ NTSTATUS MspCheckVerify(PDEVICE_OBJECT DeviceObject, PUSBMS_CONTROLLER Controlle
 	return Status;
 }
 
+static void MspCheckVerifyLocked(PUSBMS_CONTROLLER Controller, PUSBMS_LOCK_CONTEXT Context) {
+	PUSBMS_EXTENSION Ext = (PUSBMS_EXTENSION)Context->DeviceObject->DeviceExtension;
+	PUSBMS_PARTITION Partition = NULL;
+	if (Ext->Signature == SIGNATURE_PARTITION) {
+		Partition = (PUSBMS_PARTITION)Ext;
+		Ext = Partition->PhysicalDisk;
+	}
+	Context->Status = MspCheckVerifyLockedImpl(Context->DeviceObject, Controller, Ext);
+	KeSetEvent(&Context->Event, (KPRIORITY)0, FALSE);
+}
+
+NTSTATUS MspCheckVerify(PDEVICE_OBJECT DeviceObject, PUSBMS_CONTROLLER Controller, PUSBMS_EXTENSION Ext) {
+	PUSBMS_LOCK_CONTEXT Context = MspGetStateContext(Controller);
+	if (Context == NULL) return STATUS_INSUFFICIENT_RESOURCES;
+	
+	Context->DeviceObject = DeviceObject;
+	
+	NTSTATUS Status = MspLockController(MspCheckVerifyLocked, Controller, Context);
+	if (!NT_SUCCESS(Status)) {
+		MspReleaseStateContext(Context);
+		return Status;
+	}
+	
+	KeWaitForSingleObject( &Context->Event, Executive, KernelMode, FALSE, NULL);
+	Status = Context->Status;
+	MspReleaseStateContext(Context);
+	return Status;
+}
+
 static void MspFinishDpc(
 	PKDPC Dpc,
 	PVOID DeferredContext,
@@ -791,10 +1038,12 @@ static void MspFinishDpc(
 	
 	// Complete the request.
 	IoCompleteRequest(Irp, IO_DISK_INCREMENT);
+	#if 0
 	// Release the controller object.
 	IoFreeController(Controller);
 	// Start next packet.
 	IoStartNextPacket(DeviceObject, FALSE);
+	#endif
 }
 
 static NTSTATUS MspDeviceCreateImpl(
@@ -1032,6 +1281,8 @@ NTSTATUS MspDiskCreate(
 	);
 }
 
+void MsIoWorkImpl(PDEVICE_OBJECT DeviceObject, PIRP Irp);
+
 // Read/write handler
 NTSTATUS MsDiskRw(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 	PUSBMS_EXTENSION Ext = (PUSBMS_EXTENSION)DeviceObject->DeviceExtension;
@@ -1123,21 +1374,21 @@ NTSTATUS MsDiskRw(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 	
 	// All looks good, start the operation on the physical disk device.
 	Irp->IoStatus.Information = 0;
-	IoMarkIrpPending(Irp);
-	IoStartPacket(Ext->DeviceObject, Irp, &SectorOffset, NULL);
-	return STATUS_PENDING;
+	//IoMarkIrpPending(Irp);
+	//IoStartPacket(Ext->DeviceObject, Irp, &SectorOffset, NULL);
+	//return STATUS_PENDING;
+	MsIoWorkImpl(DeviceObject, Irp);
+	return Irp->IoStatus.Status;
 }
 
-void MsIoWorkRoutine(PUSBMS_WORK_ITEM Parameter) {
-	// Grab the parameters.
-	PDEVICE_OBJECT DeviceObject = Parameter->DeviceObject;
-	PIRP Irp = Parameter->Irp;
-	PUSBMS_EXTENSION ExtDisk = Parameter->ExtDisk;
-	PCONTROLLER_OBJECT CtrlObj = ExtDisk->Controller;
-	PUSBMS_CONTROLLER Controller = CtrlObj->ControllerExtension;
+void MsIoWorkLockedImpl(PUSBMS_CONTROLLER Controller, PDEVICE_OBJECT DeviceObject, PIRP Irp) {
+	PUSBMS_EXTENSION ExtDisk = (PUSBMS_EXTENSION)DeviceObject->DeviceExtension;
 	
-	// Free the work item.
-	ExFreePool(Parameter);
+	if (ExtDisk->Signature == SIGNATURE_PARTITION) {
+		PUSBMS_PARTITION Partition = (PUSBMS_PARTITION)
+			DeviceObject->DeviceExtension;
+		ExtDisk = Partition->PhysicalDisk;
+	}
 	
 	// Run a test unit ready and request sense to make sure everything's fine.
 	//PCONTROLLER_OBJECT CtrlObj = Ext->Controller;
@@ -1145,7 +1396,8 @@ void MsIoWorkRoutine(PUSBMS_WORK_ITEM Parameter) {
 	NTSTATUS Status = MspClearErrors(Controller, ExtDisk->Lun, 10);
 	if (!NT_SUCCESS(Status)) {
 		Irp->IoStatus.Status = Status;
-		KeInsertQueueDpc(&ExtDisk->FinishDpc, Irp, CtrlObj);
+		//KeInsertQueueDpc(&ExtDisk->FinishDpc, Irp, CtrlObj);
+		//MspFinishDpc(NULL, DeviceObject, Irp, CtrlObj);
 		return;
 	}
 	
@@ -1159,7 +1411,8 @@ void MsIoWorkRoutine(PUSBMS_WORK_ITEM Parameter) {
 	//NTSTATUS Status = STATUS_INVALID_PARAMETER;
 	if ((SectorCount << SectorShift) != Stack->Parameters.Read.Length) {
 		Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
-		KeInsertQueueDpc(&ExtDisk->FinishDpc, Irp, CtrlObj);
+		//KeInsertQueueDpc(&ExtDisk->FinishDpc, Irp, CtrlObj);
+		//MspFinishDpc(NULL, DeviceObject, Irp, CtrlObj);
 		return;
 	}
 	
@@ -1168,7 +1421,8 @@ void MsIoWorkRoutine(PUSBMS_WORK_ITEM Parameter) {
 		if (Buffer == NULL) {
 			Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
 			Irp->IoStatus.Information = 0;
-			KeInsertQueueDpc(&ExtDisk->FinishDpc, Irp, CtrlObj);
+			//KeInsertQueueDpc(&ExtDisk->FinishDpc, Irp, CtrlObj);
+			//MspFinishDpc(NULL, DeviceObject, Irp, CtrlObj);
 			return;
 		}
 		ULONG Transferred;
@@ -1182,7 +1436,8 @@ void MsIoWorkRoutine(PUSBMS_WORK_ITEM Parameter) {
 		if (NT_SUCCESS(Irp->IoStatus.Status)) {
 			Irp->IoStatus.Information = Length;
 		}
-		KeInsertQueueDpc(&ExtDisk->FinishDpc, Irp, CtrlObj);
+		//KeInsertQueueDpc(&ExtDisk->FinishDpc, Irp, CtrlObj);
+		//MspFinishDpc(NULL, DeviceObject, Irp, CtrlObj);
 		return;
 	}
 	
@@ -1191,7 +1446,65 @@ void MsIoWorkRoutine(PUSBMS_WORK_ITEM Parameter) {
 	// VERIFY(10) does not allow specific LUN to be used, and some USB devices might not support it, so...
 	Status = MspLowVerify(Controller, ExtDisk->Lun, SectorStart, SectorCount, SectorShift);
 	Irp->IoStatus.Status = Status;
-	KeInsertQueueDpc(&ExtDisk->FinishDpc, Irp, CtrlObj);
+	//KeInsertQueueDpc(&ExtDisk->FinishDpc, Irp, CtrlObj);
+	//MspFinishDpc(NULL, DeviceObject, Irp, CtrlObj);
+}
+
+static void MsIoWorkLocked(PUSBMS_CONTROLLER Controller, PUSBMS_LOCK_CONTEXT Context) {
+	MsIoWorkLockedImpl(
+		Controller,
+		Context->DeviceObject,
+		Context->Irp
+	);
+	KeSetEvent(&Context->Event, (KPRIORITY)0, FALSE);
+}
+
+void MsIoWorkImpl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
+	PUSBMS_EXTENSION ExtDisk = (PUSBMS_EXTENSION)DeviceObject->DeviceExtension;
+	if (ExtDisk->Signature == SIGNATURE_PARTITION) {
+		PUSBMS_PARTITION Partition = (PUSBMS_PARTITION)
+			DeviceObject->DeviceExtension;
+		ExtDisk = Partition->PhysicalDisk;
+	}
+	
+	PCONTROLLER_OBJECT CtrlObj = ExtDisk->Controller;
+	PUSBMS_CONTROLLER Controller = CtrlObj->ControllerExtension;
+
+	PUSBMS_LOCK_CONTEXT Context = MspGetStateContext(Controller);
+	if (Context == NULL) {
+		Irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+		MspFinishDpc(NULL, DeviceObject, Irp, CtrlObj);
+		return;
+	}
+	
+	Context->DeviceObject = DeviceObject;
+	Context->Irp = Irp;
+	
+	NTSTATUS Status = MspLockController(MsIoWorkLocked, Controller, Context);
+	if (!NT_SUCCESS(Status)) {
+		MspReleaseStateContext(Context);
+		Irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+		MspFinishDpc(NULL, DeviceObject, Irp, CtrlObj);
+		return;
+	}
+	
+	KeWaitForSingleObject( &Context->Event, Executive, KernelMode, FALSE, NULL);
+	MspReleaseStateContext(Context);
+	MspFinishDpc(NULL, DeviceObject, Irp, CtrlObj);
+}
+
+void MsIoWorkRoutine(PUSBMS_WORK_ITEM Parameter) {
+	// Grab the parameters.
+	PDEVICE_OBJECT DeviceObject = Parameter->DeviceObject;
+	PIRP Irp = Parameter->Irp;
+	PUSBMS_EXTENSION ExtDisk = Parameter->ExtDisk;
+	PCONTROLLER_OBJECT CtrlObj = ExtDisk->Controller;
+	PUSBMS_CONTROLLER Controller = CtrlObj->ControllerExtension;
+	
+	// Free the work item.
+	ExFreePool(Parameter);
+	
+	MsIoWorkImpl(DeviceObject, Irp);
 }
 
 IO_ALLOCATION_ACTION MsIoSeizedController(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID NullBase, PVOID Context) {
@@ -1565,7 +1878,7 @@ NTSTATUS MsDiskDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 				break;
 			}
 			Irp->IoStatus.Information = 0;
-			IoMarkIrpPending(Irp);
+			//IoMarkIrpPending(Irp);
 			// Make it look like a rw request for the async code.
 			PVERIFY_INFORMATION VerifyInfo = (PVERIFY_INFORMATION)Irp->AssociatedIrp.SystemBuffer;
 			Stack->Parameters.Read.Length = VerifyInfo->Length;
@@ -1582,9 +1895,10 @@ NTSTATUS MsDiskDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 				Status = STATUS_INVALID_PARAMETER;
 				break;
 			}
-			ULONG SectorOffset = Stack->Parameters.Read.ByteOffset.QuadPart & (Ext->SectorSize - 1);
-			IoStartPacket(Ext->DeviceObject, Irp, &SectorOffset, NULL);
-			return STATUS_PENDING;
+			//ULONG SectorOffset = Stack->Parameters.Read.ByteOffset.QuadPart & (Ext->SectorSize - 1);
+			//IoStartPacket(Ext->DeviceObject, Irp, &SectorOffset, NULL);
+			//return STATUS_PENDING;
+			// Just return success here.
 		}
 		break;
 	case IOCTL_DISK_GET_PARTITION_INFO:
@@ -1780,9 +2094,8 @@ NTSTATUS MspInitDevice(
 		}
 		// libogc implementation sends a reset here for usb1;
 		// however we're only using usbv5, so is that actually needed?
-		// let's do it anyway
-		// update: do it no matter what, we're probably coming from an arc firmware that used it.
-		MspReset(DeviceHandle, Interface->bInterfaceNumber, EndpointIn, EndpointOut);
+		// update: turns out it is not, this breaks writes for some reason???
+		//MspReset(DeviceHandle, Interface->bInterfaceNumber, EndpointIn, EndpointOut);
 		
 		PUCHAR pMaxLun = (PUCHAR)HalIopAlloc(sizeof(UCHAR));
 		if (pMaxLun == NULL) {
@@ -1827,20 +2140,30 @@ NTSTATUS MspInitDevice(
 		Extension->Interface = Interface->bInterfaceNumber;
 		Extension->MaxSize = IsUsb2 ? MAX_TRANSFER_SIZE_V2 : MAX_TRANSFER_SIZE_V1;
 		Extension->Buffer = (PVOID) (*UsbOffset + (ULONG)UsbBuffer);
+		KeInitializeDeviceQueue(&Extension->LockQueue);
 		*UsbOffset += Extension->MaxSize;
 		
 		BOOLEAN HasValidLun = FALSE;
 		BOOLEAN EntryPointsSet = DriverObject->DriverStartIo == MsStartIo;
+		CHAR Buffer[512];
 		for (int lun = 0; lun < MaxLun; lun++) {
 			USBMS_DISK_TYPE DiskType = USBMS_DISK_UNKNOWN;
 			Status = MspGetDiskType(Extension, lun, &DiskType, USBSTORAGE_TIMEOUT);
-			if (!NT_SUCCESS(Status)) continue;
+			if (!NT_SUCCESS(Status)) {
+				_snprintf(Buffer, sizeof(Buffer), "MspGetDiskType returned %08x\n", Status);
+				HalDisplayString(Buffer);
+				continue;
+			}
 
 			// Get the drive capacity, if needed.
 			ULONG SectorSize = 0;
 			ULONG SectorCount = 0;
 			Status = MspReadCapacity(Extension, lun, &SectorSize, &SectorCount, USBSTORAGE_TIMEOUT);
-			if (!NT_SUCCESS(Status) && DiskType == USBMS_DISK_OTHER_FIXED) continue;
+			if (!NT_SUCCESS(Status) && DiskType == USBMS_DISK_OTHER_FIXED) {
+				_snprintf(Buffer, sizeof(Buffer), "MspReadCapacity returned %08x\n", Status);
+				HalDisplayString(Buffer);
+				continue;
+			}
 			
 			// Set up the usbms dispatch callbacks.
 			if (!EntryPointsSet) {
@@ -1852,7 +2175,11 @@ NTSTATUS MspInitDevice(
 			}
 			// Create the device.
 			Status = MspDiskCreate(DriverObject, Controller, lun, SectorSize, SectorCount, IoConfig, ArcKey, DiskType);
-			if (!NT_SUCCESS(Status)) continue;
+			if (!NT_SUCCESS(Status)) {
+				_snprintf(Buffer, sizeof(Buffer), "MspDiskCreate returned %08x\n", Status);
+				HalDisplayString(Buffer);
+				continue;
+			}
 			
 			HasValidLun = TRUE;
 		}

@@ -641,7 +641,8 @@ int main(int argc, char** argv) {
 		// Patch to always set AHBPROT on loading TMD
 		if (!IsEmulator) patch_ahbprot_reset();
 		// reload IOS, get rid of our existing environment
-		__IOS_LaunchNewIOS(ios);
+		// try IOS58 first then fall back
+		if (ios == 58 || __IOS_LaunchNewIOS(58) < 0) __IOS_LaunchNewIOS(ios);
 		// wait for IOS to finish loading
 		usleep(1000000);
 		// and patch again, we want to reload IOS on the way in to NT

@@ -85,6 +85,10 @@ typedef struct ARC_LE _USBMS_CBW {
 	UCHAR Cb[16];
 } USBMS_CBW, *PUSBMS_CBW;
 _Static_assert(sizeof(USBMS_CBW) == 32);
+_Static_assert(__builtin_offsetof(USBMS_CBW, Flags) == 12);
+_Static_assert(__builtin_offsetof(USBMS_CBW, Lun) == 13);
+_Static_assert(__builtin_offsetof(USBMS_CBW, CbLength) == 14);
+_Static_assert(__builtin_offsetof(USBMS_CBW, Cb) == 15);
 
 typedef struct ARC_LE _USBMS_CSW {
 	ULONG Signature;
@@ -93,6 +97,7 @@ typedef struct ARC_LE _USBMS_CSW {
 	UCHAR Status;
 } USBMS_CSW, *PUSBMS_CSW;
 _Static_assert(sizeof(USBMS_CSW) == 16);
+_Static_assert(__builtin_offsetof(USBMS_CSW, Status) == 12);
 
 typedef struct ARC_BE ARC_PACKED _SCSI_FORMAT_CAPACITY_ENTRY {
 	ULONG NumberOfBlocks;

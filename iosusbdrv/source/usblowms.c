@@ -299,7 +299,7 @@ NTSTATUS MspBulkMsgTimeout(IOS_USB_HANDLE DeviceHandle, UCHAR Endpoint, USHORT L
 	// Free the async context.
 	ExFreePool( Async );
 	
-	if (!NT_SUCCESS(Status)) {
+	if (Status == 0xC0101BBE || Status == 0xC0101B5C) {
 		MspClearHalt(DeviceHandle, Endpoint);
 	}
 	
@@ -322,13 +322,13 @@ NTSTATUS MspReset(IOS_USB_HANDLE DeviceHandle, UCHAR Interface, UCHAR EndpointIn
 	KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
 	
 	UlCancelEndpoint(DeviceHandle, EndpointIn);
+	Timeout.QuadPart = -MS_TO_TIMEOUT(10);
+	KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
 	UlCancelEndpoint(DeviceHandle, EndpointOut);
-	MspClearHalt(DeviceHandle, EndpointIn);
 	Timeout.QuadPart = -MS_TO_TIMEOUT(10);
 	KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
-	MspClearHalt(DeviceHandle, EndpointOut);
-	Timeout.QuadPart = -MS_TO_TIMEOUT(10);
-	KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
+	//MspClearHalt(DeviceHandle, EndpointIn);
+	//MspClearHalt(DeviceHandle, EndpointOut);
 	
 	return Status;
 }
@@ -417,7 +417,7 @@ NTSTATUS MspReadCsw(
 	do {
 		if (!NT_SUCCESS(Status)) {
 			if (Status == 0xC0101BBE || Status == 0xC0101B5C) {
-				MspClearHalt(Controller->DeviceHandle, Controller->EndpointIn);
+				//MspClearHalt(Controller->DeviceHandle, Controller->EndpointIn);
 				Status = MspBulkMsgTimeout(
 					Controller->DeviceHandle,
 					Controller->EndpointIn,
@@ -2147,6 +2147,14 @@ NTSTATUS MspInitDevice(
 		BOOLEAN EntryPointsSet = DriverObject->DriverStartIo == MsStartIo;
 		CHAR Buffer[512];
 		for (int lun = 0; lun < MaxLun; lun++) {
+			
+			KeStallExecutionProcessor(50);
+			Status = MspClearErrors(Extension, lun, USBSTORAGE_TIMEOUT);
+			if (Status < 0) {
+				MspReset(Extension->DeviceHandle, Extension->Interface, Extension->EndpointIn, Extension->EndpointOut);
+				Status = MspClearErrors(Extension, lun, USBSTORAGE_TIMEOUT);
+			}
+			
 			USBMS_DISK_TYPE DiskType = USBMS_DISK_UNKNOWN;
 			Status = MspGetDiskType(Extension, lun, &DiskType, USBSTORAGE_TIMEOUT);
 			if (!NT_SUCCESS(Status)) {
@@ -2174,7 +2182,7 @@ NTSTATUS MspInitDevice(
 				EntryPointsSet = TRUE;
 			}
 			// Create the device.
-			Status = MspDiskCreate(DriverObject, Controller, lun, SectorSize, SectorCount, IoConfig, ArcKey, DiskType);
+			Status = MspDiskCreate(DriverObject, Controller, lun, SectorSize, SectorCount, IoConfig, ArcKey & ~BIT(31), DiskType);
 			if (!NT_SUCCESS(Status)) {
 				_snprintf(Buffer, sizeof(Buffer), "MspDiskCreate returned %08x\n", Status);
 				HalDisplayString(Buffer);

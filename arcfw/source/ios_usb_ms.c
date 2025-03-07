@@ -218,10 +218,10 @@ static LONG MspCtrlMsgTimeout(IOS_USB_HANDLE DeviceHandle, UCHAR RequestType, UC
 	ULONG AsyncIndex = (ULONG)Status;
 	PVOID Context = NULL;
 	Status = -2;
-	for (ULONG i = 0; i < (SecondsTimeout * 1000); i++) {
+	ULONG endmsecs = currmsecs() + (SecondsTimeout * 1000) + 1;
+	do {
 		if (PxiIopIoctlvAsyncPoll(AsyncIndex, &Status, &Context)) break;
-		udelay(1000);
-	}
+	} while (currmsecs() < endmsecs);
 
 	if (Status == -2) {
 		// Cancel the control message.
@@ -247,10 +247,10 @@ static LONG MspBulkMsgTimeout(IOS_USB_HANDLE DeviceHandle, UCHAR Endpoint, USHOR
 	ULONG AsyncIndex = (ULONG)Status;
 	PVOID Context = NULL;
 	Status = -2;
-	for (ULONG i = 0; i < (SecondsTimeout * 1000); i++) {
+	ULONG endmsecs = currmsecs() + (SecondsTimeout * 1000) + 1;
+	do {
 		if (PxiIopIoctlvAsyncPoll(AsyncIndex, &Status, &Context)) break;
-		udelay(1000);
-	}
+	} while (currmsecs() < endmsecs);
 
 	if (Status == -2) {
 		// Cancel the endpoint message.
@@ -264,7 +264,7 @@ static LONG MspBulkMsgTimeout(IOS_USB_HANDLE DeviceHandle, UCHAR Endpoint, USHOR
 	// Ensure the usblow context gets freed.
 	UlGetPassedAsyncContext(Context);
 
-	if (Status < 0) {
+	if (Status == -7102 || Status == -7004) {
 		MspClearHalt(DeviceHandle, Endpoint);
 	}
 
@@ -288,8 +288,8 @@ static LONG MspReset(IOS_USB_HANDLE DeviceHandle, UCHAR Interface, UCHAR Endpoin
 	udelay(10000);
 	UlCancelEndpoint(DeviceHandle, EndpointOut);
 	udelay(10000);
-	MspClearHalt(DeviceHandle, EndpointIn);
-	MspClearHalt(DeviceHandle, EndpointOut);
+	//MspClearHalt(DeviceHandle, EndpointIn);
+	//MspClearHalt(DeviceHandle, EndpointOut);
 	return Status;
 }
 
@@ -316,10 +316,13 @@ static LONG MspSendCbw(
 	Cbw.Length = Length;
 	Cbw.Lun = Lun;
 	Cbw.Flags = Flags;
+#if 0
 	if (CbLength > 12) Cbw.CbLength = 16;
 	else if (CbLength > 10) Cbw.CbLength = 12;
 	else if (CbLength > 6) Cbw.CbLength = 10;
 	else Cbw.CbLength = 6;
+#endif
+	Cbw.CbLength = (CbLength > 6 ? 10 : 6);
 	memcpy(Cbw.Cb, Cb, CbLength);
 	memcpy32(pCbw, &Cbw, sizeof(Cbw));
 
@@ -380,7 +383,7 @@ static LONG MspReadCsw(
 		if (Status < 0) {
 			if (Status == -7102 || Status == -7004) {
 				// Endpoint halted, clear the halt and try again.
-				MspClearHalt(Controller->DeviceHandle, Controller->EndpointIn);
+				//MspClearHalt(Controller->DeviceHandle, Controller->EndpointIn);
 				Status = MspBulkMsgTimeout(
 					Controller->DeviceHandle,
 					Controller->EndpointIn,
@@ -1044,7 +1047,7 @@ static LONG MspInitDevice(
 
 		// Fill in the parameters.
 		Extension->DeviceHandle = DeviceHandle;
-		Extension->ArcKey = ArcKey;
+		Extension->ArcKey = ArcKey & ~ARC_BIT(31);
 		Extension->EndpointIn = EndpointIn;
 		Extension->EndpointOut = EndpointOut;
 		Extension->Interface = Interface->bInterfaceNumber;
@@ -1056,6 +1059,14 @@ static LONG MspInitDevice(
 		bool HasValidLun = false;
 		ULONG LunArr = 0;
 		for (ULONG lun = 0; lun < MaxLun; lun++) {
+
+			udelay(50);
+			Status = MspClearErrors(Extension, lun, USBSTORAGE_TIMEOUT);
+			if (Status < 0) {
+				MspReset(Extension->DeviceHandle, Extension->Interface, Extension->EndpointIn, Extension->EndpointOut);
+				Status = MspClearErrors(Extension, lun, USBSTORAGE_TIMEOUT);
+			}
+
 			USBMS_DISK_TYPE DiskType = USBMS_DISK_UNKNOWN;
 
 			Status = MspGetDiskType(Extension, lun, &DiskType, USBSTORAGE_TIMEOUT);
@@ -1067,7 +1078,10 @@ static LONG MspInitDevice(
 			ULONG SectorSize = 0;
 			ULONG SectorCount = 0;
 			Status = MspReadCapacity(Extension, lun, &SectorSize, &SectorCount, USBSTORAGE_TIMEOUT);
-			if (Status < 0 && DiskType == USBMS_DISK_OTHER_FIXED) continue;
+			if (Status < 0 && DiskType == USBMS_DISK_OTHER_FIXED) {
+				MspClearErrors(Extension, lun, USBSTORAGE_TIMEOUT);
+				continue;
+			}
 
 			// Set up the current LUN.
 			Extension->Luns[LunArr].SectorSize = SectorSize;
@@ -1080,11 +1094,13 @@ static LONG MspInitDevice(
 			Status = MspCheckVerify(Extension, lun);
 			if (Status < 0) {
 				Extension->Luns[LunArr].LunValid = false;
+				MspClearErrors(Extension, lun, USBSTORAGE_TIMEOUT);
 				continue;
 			}
 
 			LunArr++;
 			HasValidLun = true;
+			udelay(10000);
 		}
 		Extension->NumberOfLuns = LunArr;
 		if (HasValidLun) Status = 0;
@@ -1140,7 +1156,7 @@ bool UlmsInit(void) {
 void UlmsFinalise(void) {
 	for (ULONG i = 0; i < USB_COUNT_DEVICES; i++) {
 		if (s_MassStorageDevices[i].ArcKey == 0) continue;
-		UlClearHalt(s_MassStorageDevices[i].DeviceHandle);
+		//UlClearHalt(s_MassStorageDevices[i].DeviceHandle);
 		UlCloseDevice(s_MassStorageDevices[i].DeviceHandle);
 		s_MassStorageDevices[i].ArcKey = 0;
 	}
@@ -1183,6 +1199,9 @@ ULONG UlmsReadSectors(PUSBMS_CONTROLLER Controller, ULONG Lun, ULONG Sector, ULO
 	if (!LunObj->LunValid) return 0;
 	Lun = LunObj->RealLun;
 
+	ULONG Status = MspClearErrors(Controller, Lun, 10);
+	if (Status < 0) return 0;
+
 	return MspLowRead(Controller, Lun, Sector, NumSector, LunObj->SectorShift, Buffer);
 }
 
@@ -1192,6 +1211,9 @@ ULONG UlmsWriteSectors(PUSBMS_CONTROLLER Controller, ULONG Lun, ULONG Sector, UL
 	PUSBMS_LUN LunObj = &Controller->Luns[Lun];
 	if (!LunObj->LunValid) return 0;
 	Lun = LunObj->RealLun;
+
+	ULONG Status = MspClearErrors(Controller, Lun, 10);
+	if (Status < 0) return 0;
 
 	return MspLowWrite(Controller, Lun, Sector, NumSector, LunObj->SectorShift, Buffer);
 }
